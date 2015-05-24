@@ -1,0 +1,182 @@
+---
+title: "Activity Recognition Report - Machine Learning"
+output: html_document
+---
+
+##Abstract 
+
+This report is based on the paper “Qualitative Activity Recognition of Weight Lifting Exercises” where 3D orientation and acceleration data from for four devices were capture. The participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+
+The goal of this report is to predict the manner in which they did the exercise. This is the “classe” variable in the training set.  
+
+##Introduction
+
+##Summaries of the problem, data and methods
+
+##Problem Summary
+
+The problem is a classification problem and the goal is to predict the value of a categorical variable “classe” given a number of input variables.
+Data classification
+
+##Data Summary
+
+ The data sets for this reports are: 
+ 
+*pml-training.csv with 19662 observations. This will be used in the training process 
+*pml-testing.csv with 20 observation. This is the dataset that I will use to submit the prediction to the project submission.
+
+In the training data set there are a number of columns that contain missing values, invalid strings and empty columns. I am going to perform an explanatory data analysis that consists of two steps. The first step is a visual checking of the data including the R command Summary to determine the data quality. The second step is to run an R script to determine what columns can be the candidates for the prediction. I am going to filter the columns to include only the variables related with the devices and remove a priori time, participant and sequence variables. The Belt, arm, dumbbell, and forearm variables that do not have any missing values in the training dataset and will be predictor candidates.
+
+##Data Processing and Cross Validation
+
+I am using a simple cross validation strategy, the hold-set out. I am randomly dividing the observations into two parts, the training and the validation set or hold-out set. I am utilizing the caret function “createDataPartition” to create a training set with 60% of the data for training and 40% for the validation set.
+
+```{R Init, message=FALSE}
+library(caret)
+library(doParallel)
+library(gbm)
+library(dplyr)
+library(nnet)
+library(kohonen)
+library(scales)
+
+training <- read.csv("pml-training.csv",sep=",",na.strings=c("NA","#DIV/0!", ""))
+testing <- read.csv("pml-testing.csv",sep=",",na.strings=c("NA","#DIV/0!", ""))
+            
+#summary(training) This was ommited due the output length            
+            
+missingValues <- sapply(training, function (x) any(is.na(x) | x == ""))
+predictorColumns <- !missingValues & grepl("belt|[^(fore)]arm|dumbbell|forearm",                                         names(missingValues))
+                                            
+tColumns <- c(names(missingValues)[predictorColumns], "classe")
+
+inTrain <- createDataPartition(y=training$classe,p=0.6,list=FALSE)              
+              
+```
+
+##Methods Summary
+
+###Random Forrest (rf)
+
+```{R rf.code, message=FALSE}
+# Random Forrest
+
+set.seed(8787)
+cl <- makeCluster(4)
+registerDoParallel(cl)
+
+rf.training <- training[inTrain,tColumns]
+rf.testing <- training[-inTrain,tColumns]
+
+rf.Grid <-  expand.grid(mtry = 8)
+rf.tcontrol  <- trainControl(method="cv", number=3)
+
+rf.strt<-Sys.time()
+
+rf.model <- train(classe ~. ,data = rf.training, method = "rf",
+                   trControl = rf.tcontrol, 
+                   tuneGrid  = rf.Grid,
+                   verbose   = FALSE)
+                   
+rf.runtime <- Sys.time() - rf.strt
+stopCluster(cl)
+
+rf.prediction <- predict(rf.model, newdata=rf.testing)
+rf.cm <-confusionMatrix(rf.testing[,"classe"],rf.prediction)
+
+print(rf.runtime)
+print(rf.cm)
+```
+
+###Generalized Boosted Regression  (gbm) 
+
+```{R gbm.code, message=FALSE}
+
+#gbm
+
+set.seed(8787)
+cl <- makeCluster(4)
+registerDoParallel(cl)
+
+
+gbm.training <- training[inTrain,tColumns]
+gbm.testing <- training[-inTrain,tColumns]
+
+
+gbm.Grid <-  expand.grid(interaction.depth = 3, 
+                          n.trees = 2000, 
+                          shrinkage = 0.01,
+                          n.minobsinnode = 10)
+
+gbm.tcontrol  <- trainControl(method="cv", number=2)
+
+gbm.strt<-Sys.time()
+
+gbm.model <- train(classe ~. ,data = gbm.training, method = "gbm",
+               trControl = gbm.tcontrol, 
+               tuneGrid=gbm.Grid,verbose = FALSE)
+               
+gbm.runtime <- Sys.time() - gbm.strt
+stopCluster(cl)
+
+gbm.prediction <- predict(gbm.model, newdata=gbm.testing)
+gbm.cm <-confusionMatrix(gbm.testing[,"classe"],gbm.prediction)
+
+print(gbm.runtime)
+print(gbm.cm)
+
+```
+###Neural Networks (nnet)
+
+```{R nnet.code, message=FALSE}
+
+#nnet
+source("NormalizeFunc.R")
+
+set.seed(8787)
+cl <- makeCluster(4)
+registerDoParallel(cl)
+
+nnet.Columns <- tColumns[1:52]
+classe.vars <- class.ind(training[inTrain,]$classe)
+
+nnet.training <- normalize(training[inTrain,nnet.Columns])
+nnet.training.mm <- minmax(training[inTrain,nnet.Columns])
+nnet.testing <- normalize(training[-inTrain,nnet.Columns],nnet.training.mm)
+
+nnet.strt<-Sys.time()
+
+nnet.model <- nnet(nnet.training,classe.vars,softmax=TRUE , 
+                  trace = FALSE,size = 43 , 
+                  maxit = 3000, decay =0.01, MaxNWts = 2500)
+
+nnet.runtime <- Sys.time()- nnet.strt
+
+nnet.prediction <- predict(nnet.model, newdata =nnet.testing, type = "class")
+
+nnet.cm <-confusionMatrix(training[-inTrain,"classe"],nnet.prediction)
+
+stopCluster(cl)
+print(nnet.runtime)
+print(nnet.cm)
+```
+
+#Results
+
+The Out of Sample Error rate is calculated using the formula 1 - accuracy for each of the models when using the testing data generated from  the cross validation process. 
+
+```{R Results}
+rf.ooe <- percent(1 - rf.cm$overall[1])
+print(rf.ooe)
+print(rf.runtime)
+
+gbm.ooe  <- percent(1 - gbm.cm$overall[1])
+print(gbm.ooe)
+print(gbm.runtime)
+
+nnet.ooe  <- percent(1 - nnet.cm$overall[1])
+print(nnet.ooe)
+print(nnet.runtime)
+```
+
+I selected the output produced by the neural network model with 19 out 20 correct classifications. For the remaning missclasification I used the random forrest and gbm models to select the correct value.
